@@ -1,6 +1,10 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
+import { generateText } from 'ai'
 import type { ExtractedMemory, MemoryChunkType } from '~~/shared/types'
-import { logTokenUsage } from '../utils/log-token-usage'
+import { logTokenUsage } from '~~/server/utils/log-token-usage'
+import { getDefaultProvider } from '~~/server/ai/get-provider'
+import { createModel } from '~~/server/ai/provider'
+import { estimateCost } from '~~/server/ai/cost'
 
 const EXTRACTION_PROMPT = `You are a memory extraction assistant. Analyze this conversation excerpt and extract key memories worth preserving for future reference.
 
@@ -29,16 +33,8 @@ export async function extractMemories(transcript: string): Promise<ExtractedMemo
     return []
 
   try {
-    // Use Agent SDK which checks CLAUDE_CODE_OAUTH_TOKEN first (Max subscription),
-    // then falls back to ANTHROPIC_API_KEY (API billing)
-    const conversation = query({
-      prompt: `${EXTRACTION_PROMPT}\n\n${transcript.slice(0, 8000)}`,
-      options: {
-        maxTurns: 1, // Single turn extraction
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true
-      }
-    })
+    const provider = await getDefaultProvider()
+    const prompt = `${EXTRACTION_PROMPT}\n\n${transcript.slice(0, 8000)}`
 
     let result = ''
     let costUsd = 0
@@ -46,31 +42,39 @@ export async function extractMemories(transcript: string): Promise<ExtractedMemo
     let inputTokens = 0
     let outputTokens = 0
 
-    // Stream through messages and get the result
-    for await (const message of conversation) {
-      if (message.type === 'result') {
-        const msg = message as unknown as {
-          subtype: string
-          result?: string
-          total_cost_usd: number
-          duration_ms: number
-          usage: { input_tokens: number, output_tokens: number }
-        }
-        if (msg.subtype === 'success' && msg.result)
-          result = msg.result
+    const startTime = Date.now()
 
-        costUsd = msg.total_cost_usd || 0
-        durationMs = msg.duration_ms || 0
-        inputTokens = msg.usage?.input_tokens || 0
-        outputTokens = msg.usage?.output_tokens || 0
-      }
+    if (provider.type === 'claude-code') {
+      // Use Agent SDK for Claude Code provider
+      const sdkResult = await extractViaSDK(prompt)
+      result = sdkResult.text
+      costUsd = sdkResult.costUsd
+      durationMs = sdkResult.durationMs
+      inputTokens = sdkResult.inputTokens
+      outputTokens = sdkResult.outputTokens
+    } else {
+      // Use AI SDK for all other providers
+      const model = await createModel(provider)
+      const response = await generateText({
+        model,
+        prompt,
+        maxOutputTokens: 1000
+      })
+
+      result = response.text
+      inputTokens = response.usage?.inputTokens || 0
+      outputTokens = response.usage?.outputTokens || 0
+      durationMs = Date.now() - startTime
+      costUsd = estimateCost(provider.model, inputTokens, outputTokens)
     }
 
-    // Log token usage for memory extraction
+    // Log token usage
     if (costUsd > 0 || inputTokens > 0)
       logTokenUsage({
         source: 'memory_extraction',
         sourceName: 'Memory Extraction',
+        provider: provider.type,
+        model: provider.model,
         inputTokens,
         outputTokens,
         costUsd,
@@ -78,14 +82,63 @@ export async function extractMemories(transcript: string): Promise<ExtractedMemo
         numTurns: 1
       })
 
-    if (!result)
-      return []
+    return parseMemories(result)
+  } catch (error) {
+    console.error('[memory-extractor] Failed to extract memories:', error)
+    return []
+  }
+}
 
-    // Extract JSON array from result (may have surrounding text)
-    const jsonMatch = result.match(/\[[\s\S]*\]/)
-    if (!jsonMatch)
-      return []
+/**
+ * Extract memories using Claude Agent SDK (for claude-code provider).
+ */
+async function extractViaSDK(prompt: string) {
+  const conversation = query({
+    prompt,
+    options: {
+      maxTurns: 1,
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true
+    }
+  })
 
+  let text = ''
+  let costUsd = 0
+  let durationMs = 0
+  let inputTokens = 0
+  let outputTokens = 0
+
+  for await (const message of conversation) {
+    if (message.type === 'result') {
+      const msg = message as unknown as {
+        subtype: string
+        result?: string
+        total_cost_usd: number
+        duration_ms: number
+        usage: { input_tokens: number, output_tokens: number }
+      }
+      if (msg.subtype === 'success' && msg.result)
+        text = msg.result
+      costUsd = msg.total_cost_usd || 0
+      durationMs = msg.duration_ms || 0
+      inputTokens = msg.usage?.input_tokens || 0
+      outputTokens = msg.usage?.output_tokens || 0
+    }
+  }
+
+  return { text, costUsd, durationMs, inputTokens, outputTokens }
+}
+
+/**
+ * Parse JSON memory array from AI response text.
+ */
+function parseMemories(text: string): ExtractedMemory[] {
+  if (!text) return []
+
+  const jsonMatch = text.match(/\[[\s\S]*\]/)
+  if (!jsonMatch) return []
+
+  try {
     const memories = JSON.parse(jsonMatch[0]) as Array<{
       type: string
       content: string
@@ -97,8 +150,7 @@ export async function extractMemories(transcript: string): Promise<ExtractedMemo
         type: m.type as MemoryChunkType,
         content: m.content.slice(0, 200)
       }))
-  } catch (error) {
-    console.error('[memory-extractor] Failed to extract memories:', error)
+  } catch {
     return []
   }
 }
@@ -114,7 +166,6 @@ export async function extractMemoriesFromTranscriptFile(transcriptPath: string):
     const content = await fs.readFile(transcriptPath, 'utf-8')
     const lines = content.trim().split('\n')
 
-    // Parse JSONL and extract recent messages
     const messages: Array<{ role: string, content: string }> = []
     for (const line of lines.slice(-20)) {
       try {
@@ -129,7 +180,6 @@ export async function extractMemoriesFromTranscriptFile(transcriptPath: string):
     if (messages.length === 0)
       return []
 
-    // Format for extraction
     const formatted = messages
       .map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 1000)}`)
       .join('\n\n')

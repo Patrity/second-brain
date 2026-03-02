@@ -1,9 +1,16 @@
 import { randomUUID } from 'crypto'
 import { query } from '@anthropic-ai/claude-agent-sdk'
+import { generateText, stepCountIs } from 'ai'
 import { eq, sql } from 'drizzle-orm'
 import { getDb, schema } from '~~/server/db'
 import { logTokenUsage } from '~~/server/utils/log-token-usage'
 import { sdkEnv } from '~~/server/utils/sdk-env'
+import { getDefaultProvider } from '~~/server/ai/get-provider'
+import { createModel } from '~~/server/ai/provider'
+import { buildSystemPrompt } from '~~/server/ai/prompt-builder'
+import { loadConversationHistory } from '~~/server/ai/history'
+import { getAiSdkTools } from '~~/server/ai/tools'
+import { estimateCost } from '~~/server/ai/cost'
 import { sendOutboundMessage } from './router'
 import type { NormalizedMessage } from './types'
 
@@ -65,7 +72,7 @@ async function loadMemoryContext(): Promise<string> {
   }
 }
 
-// SDK result shape (same as agent-executor.ts)
+// SDK result shape
 interface SDKResult {
   subtype: string
   total_cost_usd: number
@@ -78,7 +85,7 @@ interface SDKResult {
 }
 
 /**
- * Generate a response to a bridge message using the Claude Agent SDK.
+ * Generate a response to a bridge message using the configured AI provider.
  * Routes through the unified Main Chat conversation.
  */
 export async function generateBridgeResponse(
@@ -117,7 +124,7 @@ export async function generateBridgeResponse(
     source: message.platform
   })
 
-  // Build the prompt — frame as direct conversation, not a notification
+  // Build the prompt
   const memoryContext = await loadMemoryContext()
   const parts: string[] = []
   if (memoryContext) parts.push(memoryContext)
@@ -138,21 +145,50 @@ export async function generateBridgeResponse(
   let outputTokens = 0
   let numTurns = 0
 
+  const provider = await getDefaultProvider()
+
   try {
-    const result = await runQuery(prompt, mainChat.sdkSessionId || undefined)
-    responseText = result.text
-    sdkSessionId = result.sdkSessionId
-    costUsd = result.costUsd
-    durationMs = result.durationMs
-    inputTokens = result.inputTokens
-    outputTokens = result.outputTokens
-    numTurns = result.numTurns
+    if (provider.type === 'claude-code') {
+      // Use Agent SDK for Claude Code provider
+      const result = await runSDKQuery(prompt, mainChat.sdkSessionId || undefined)
+      responseText = result.text
+      sdkSessionId = result.sdkSessionId
+      costUsd = result.costUsd
+      durationMs = result.durationMs
+      inputTokens = result.inputTokens
+      outputTokens = result.outputTokens
+      numTurns = result.numTurns
+    } else {
+      // Use AI SDK for all other providers
+      const startTime = Date.now()
+      const model = await createModel(provider)
+      const systemPrompt = await buildSystemPrompt()
+      const history = await loadConversationHistory(mainChat.id)
+
+      const result = await generateText({
+        model,
+        system: systemPrompt,
+        messages: [
+          ...history,
+          { role: 'user', content: prompt }
+        ],
+        tools: getAiSdkTools(),
+        stopWhen: stepCountIs(50)
+      })
+
+      responseText = result.text
+      inputTokens = result.usage?.inputTokens || 0
+      outputTokens = result.usage?.outputTokens || 0
+      durationMs = Date.now() - startTime
+      costUsd = estimateCost(provider.model, inputTokens, outputTokens)
+      numTurns = result.steps?.length || 1
+    }
   } catch (error) {
-    // If resume fails, retry without resume
-    if (mainChat.sdkSessionId) {
+    // If resume fails with SDK, retry without resume
+    if (provider.type === 'claude-code' && mainChat.sdkSessionId) {
       console.warn('[bridge] SDK resume failed, retrying fresh:', error instanceof Error ? error.message : error)
       try {
-        const result = await runQuery(prompt, undefined)
+        const result = await runSDKQuery(prompt, undefined)
         responseText = result.text
         sdkSessionId = result.sdkSessionId
         costUsd = result.costUsd
@@ -165,7 +201,7 @@ export async function generateBridgeResponse(
         responseText = 'Sorry, I ran into an issue processing your message. Please try again.'
       }
     } else {
-      console.error('[bridge] SDK query failed:', error)
+      console.error('[bridge] Query failed:', error)
       responseText = 'Sorry, I ran into an issue processing your message. Please try again.'
     }
   }
@@ -182,7 +218,7 @@ export async function generateBridgeResponse(
     .set({
       status: 'idle',
       sdkSessionId: sdkSessionId || mainChat.sdkSessionId,
-      messageCount: msgs.length + 1, // +1 for the assistant message we're about to add
+      messageCount: msgs.length + 1,
       totalCostUsd: (mainChat.totalCostUsd || 0) + costUsd,
       endedAt: new Date()
     })
@@ -203,6 +239,8 @@ export async function generateBridgeResponse(
       source: 'bridge',
       sourceId: mainChat.id,
       sourceName: `Bridge: ${message.platform}`,
+      provider: provider.type,
+      model: provider.model,
       inputTokens,
       outputTokens,
       costUsd,
@@ -223,7 +261,7 @@ export async function generateBridgeResponse(
 /**
  * Run a Claude Agent SDK query and extract the response.
  */
-interface QueryResult {
+interface SDKQueryResult {
   text: string
   sdkSessionId?: string
   costUsd: number
@@ -233,17 +271,17 @@ interface QueryResult {
   numTurns: number
 }
 
-async function runQuery(
+async function runSDKQuery(
   prompt: string,
   resumeSessionId?: string
-): Promise<QueryResult> {
+): Promise<SDKQueryResult> {
   const projectDir = process.env.COGNOVA_PROJECT_DIR || process.cwd()
 
   const conversation = query({
     prompt,
     options: {
       cwd: projectDir,
-      env: sdkEnv(),
+      env: sdkEnv('claude-code'),
       settingSources: ['user', 'project'],
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,

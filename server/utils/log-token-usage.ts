@@ -5,6 +5,8 @@ interface TokenUsageEntry {
   source: 'chat' | 'agent' | 'memory_extraction' | 'bridge'
   sourceId?: string
   sourceName?: string
+  provider?: string
+  model?: string
   inputTokens: number
   outputTokens: number
   costUsd: number

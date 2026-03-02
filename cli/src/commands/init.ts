@@ -15,7 +15,125 @@ import { setupAndStart } from '../lib/process-manager'
 import { waitForHealth } from '../lib/health'
 import { loadProgress, saveProgress, clearProgress } from '../lib/progress'
 import { withRetry, SkipError } from '../lib/retry'
-import type { InitConfig, SetupProgress } from '../lib/types'
+import type { InitConfig, SetupProgress, AIProviderType, AIProviderConfig } from '../lib/types'
+
+const PROVIDER_ENV_KEYS: Partial<Record<AIProviderType, string>> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  google: 'GOOGLE_GENERATIVE_AI_API_KEY',
+  xai: 'XAI_API_KEY',
+  openrouter: 'OPENROUTER_API_KEY'
+}
+
+const PROVIDER_MODELS: Partial<Record<AIProviderType, Array<{ value: string, label: string }>>> = {
+  'claude-code': [
+    { value: 'sonnet', label: 'Sonnet (default)' },
+    { value: 'opus', label: 'Opus' },
+    { value: 'haiku', label: 'Haiku' }
+  ],
+  'anthropic': [
+    { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
+    { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+    { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' }
+  ],
+  'openai': [
+    { value: 'gpt-4o', label: 'GPT-4o' },
+    { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
+    { value: 'gpt-4.1', label: 'GPT-4.1' }
+  ],
+  'google': [
+    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+    { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' }
+  ],
+  'xai': [
+    { value: 'grok-3', label: 'Grok 3' },
+    { value: 'grok-3-mini', label: 'Grok 3 Mini' }
+  ]
+}
+
+async function promptAiProvider(): Promise<AIProviderConfig | undefined> {
+  const providerType = await p.select({
+    message: 'Select AI provider',
+    options: [
+      { value: 'claude-code', label: 'Claude Code', hint: 'Uses existing Claude Code subscription' },
+      { value: 'anthropic', label: 'Anthropic API', hint: 'Pay-per-token, recommended' },
+      { value: 'openai', label: 'OpenAI', hint: 'GPT-4o, GPT-4.1' },
+      { value: 'google', label: 'Google Gemini', hint: 'Gemini 2.5 Pro, Flash' },
+      { value: 'xai', label: 'xAI (Grok)', hint: 'Grok 3' },
+      { value: 'openrouter', label: 'OpenRouter', hint: '300+ models' },
+      { value: 'ollama', label: 'Ollama', hint: 'Local models' },
+      { value: 'custom', label: 'Custom', hint: 'OpenAI-compatible endpoint' }
+    ]
+  }) as AIProviderType
+  if (p.isCancel(providerType)) process.exit(0)
+
+  // TOS warning for Claude Code
+  if (providerType === 'claude-code') {
+    p.log.warn(pc.yellow([
+      'Using your Claude subscription (OAuth token) in third-party apps',
+      'may violate Anthropic\'s Consumer Terms of Service.',
+      'Anthropic has banned accounts for this. Use at your own risk.',
+      'For compliant usage, choose Anthropic API instead.'
+    ].join('\n')))
+  }
+
+  // Model selection
+  const models = PROVIDER_MODELS[providerType]
+  let model: string
+  if (models) {
+    model = await p.select({
+      message: 'Select default model',
+      options: models
+    }) as string
+    if (p.isCancel(model)) process.exit(0)
+  } else {
+    const modelInput = await p.text({
+      message: 'Enter model ID',
+      placeholder: providerType === 'ollama' ? 'llama3' : 'model-name'
+    })
+    if (p.isCancel(modelInput)) process.exit(0)
+    model = modelInput as string
+  }
+
+  // API key
+  const envKey = PROVIDER_ENV_KEYS[providerType]
+  let apiKey: string | undefined
+  if (envKey) {
+    const keyInput = await p.password({ message: `Enter your API key (${envKey})` })
+    if (p.isCancel(keyInput)) process.exit(0)
+    apiKey = keyInput as string
+  }
+
+  // Base URL for ollama/custom
+  let baseUrl: string | undefined
+  if (providerType === 'ollama' || providerType === 'custom') {
+    const urlInput = await p.text({
+      message: 'Base URL',
+      placeholder: providerType === 'ollama' ? 'http://localhost:11434' : 'https://api.example.com/v1',
+      defaultValue: providerType === 'ollama' ? 'http://localhost:11434' : undefined
+    })
+    if (p.isCancel(urlInput)) process.exit(0)
+    baseUrl = urlInput as string
+  }
+
+  // Provider name
+  const nameInput = await p.text({
+    message: 'Name this provider',
+    placeholder: `My ${providerType}`,
+    defaultValue: `My ${providerType}`
+  })
+  if (p.isCancel(nameInput)) process.exit(0)
+
+  return {
+    type: providerType,
+    name: nameInput as string,
+    model,
+    apiKey,
+    baseUrl,
+    envKey,
+    isDefault: true
+  }
+}
 
 export async function init() {
   p.intro(pc.bgCyan(pc.black(' Cognova Setup ')))
@@ -247,6 +365,17 @@ export async function init() {
     saveProgress(progress)
   }
 
+  // Step 7b: AI Provider
+  p.log.step(pc.bold('AI Provider'))
+  let aiProvider = progress.partialConfig.aiProvider as AIProviderConfig | undefined
+
+  if (!aiProvider && !progress.completedSteps.includes('aiProvider')) {
+    aiProvider = await promptAiProvider()
+    progress.partialConfig.aiProvider = aiProvider
+    progress.completedSteps.push('aiProvider')
+    saveProgress(progress)
+  }
+
   // Assemble config
   const config: InitConfig = {
     personality,
@@ -260,7 +389,8 @@ export async function init() {
     },
     appUrl,
     accessMode,
-    installDir: resolvedInstallDir
+    installDir: resolvedInstallDir,
+    aiProvider
   }
 
   // Step 8: Generate files

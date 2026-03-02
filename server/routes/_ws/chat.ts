@@ -5,6 +5,8 @@ import { getDb } from '~~/server/db'
 import * as schema from '~~/server/db/schema'
 import { logTokenUsage } from '~~/server/utils/log-token-usage'
 import { auth } from '~~/server/utils/auth'
+import { getProviderForConversation, getDefaultProvider } from '~~/server/ai/get-provider'
+import { estimateCost } from '~~/server/ai/cost'
 import type { ChatClientMessage, ChatContentBlock, ChatImageBlock, ChatDocumentBlock } from '~~/shared/types'
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages/messages'
 
@@ -119,10 +121,12 @@ async function handleSend(
   let resumeSessionId: string | undefined
 
   if (!convId) {
-    // New conversation
+    // New conversation — use the default provider
+    const defaultProvider = await getDefaultProvider()
     const [conv] = await db.insert(schema.conversations)
       .values({
         sessionId: randomUUID(),
+        providerId: defaultProvider.id !== 'fallback' ? defaultProvider.id : null,
         title: message.slice(0, 100) || 'File attachment',
         status: 'streaming',
         messageCount: 0,
@@ -171,16 +175,25 @@ async function handleSend(
     source: 'web'
   })
 
-  // Build prompt for SDK (string for text-only, ContentBlockParam[] for multimodal)
-  const prompt = buildSdkContent(message, attachments, documents)
+  // Determine provider for this conversation
+  const provider = await getProviderForConversation(convId)
 
-  // Start SDK streaming (fire-and-forget so WS stays responsive for interrupts)
-  const session = chatSessionManager.startSession(convId, prompt, resumeSessionId)
   send(peer, { type: 'chat:stream_start', conversationId: convId })
 
-  streamSDKResponse(peer, session, convId).catch((err) => {
-    console.error('[chat] Unhandled stream error:', err)
-  })
+  if (provider.type === 'claude-code') {
+    // SDK path — same as before
+    const prompt = buildSdkContent(message, attachments, documents)
+    const session = chatSessionManager.startSdkSession(convId, prompt, provider, resumeSessionId)
+    streamSDKResponse(peer, session, convId).catch((err) => {
+      console.error('[chat] Unhandled SDK stream error:', err)
+    })
+  } else {
+    // AI SDK path — streamText
+    const session = await chatSessionManager.startAiSdkSession(convId, message, provider)
+    streamAiSdkResponse(peer, session, convId, provider).catch((err) => {
+      console.error('[chat] Unhandled AI SDK stream error:', err)
+    })
+  }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -189,6 +202,10 @@ function handleInterrupt(peer: any, conversationId: string) {
   if (!interrupted)
     send(peer, { type: 'chat:error', conversationId, message: 'No active session to interrupt' })
 }
+
+// =============================================================================
+// SDK Streaming (Claude Code provider)
+// =============================================================================
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function streamSDKResponse(peer: any, session: any, conversationId: string) {
@@ -212,7 +229,6 @@ async function streamSDKResponse(peer: any, session: any, conversationId: string
           .set({ sdkSessionId: message.session_id })
           .where(eq(schema.conversations.id, conversationId))
       } else if (message.type === 'stream_event') {
-        // Real-time streaming events from the Anthropic API
         const event = message.event
         if (event.type === 'content_block_delta') {
           const deltaType = event.delta?.type
@@ -231,11 +247,9 @@ async function streamSDKResponse(peer: any, session: any, conversationId: string
           }
         }
       } else if (message.type === 'assistant') {
-        // Complete assistant turn — capture content blocks for persistence
         for (const block of message.message?.content || []) {
           if (block.type === 'text') {
             contentBlocks.push({ type: 'text', text: block.text })
-            // Fallback: if no stream_events arrived, send full text now
             if (!currentText)
               send(peer, { type: 'chat:text_delta', conversationId, delta: block.text })
           } else if (block.type === 'tool_use') {
@@ -249,7 +263,6 @@ async function streamSDKResponse(peer: any, session: any, conversationId: string
         }
         currentText = ''
       } else if (message.type === 'user') {
-        // User messages contain tool results from SDK tool execution
         const content = message.message?.content
         if (Array.isArray(content)) {
           for (const block of content) {
@@ -276,7 +289,6 @@ async function streamSDKResponse(peer: any, session: any, conversationId: string
           }
         }
       } else if (message.type === 'result') {
-        // Cast to access usage fields the SDK provides but aren't in the TS types
         const msg = message as unknown as {
           total_cost_usd: number
           duration_ms: number
@@ -288,7 +300,6 @@ async function streamSDKResponse(peer: any, session: any, conversationId: string
         const inputTokens = msg.usage?.input_tokens || 0
         const outputTokens = msg.usage?.output_tokens || 0
 
-        // Persist assistant message
         if (contentBlocks.length > 0) {
           await db.insert(schema.conversationMessages).values({
             conversationId,
@@ -299,12 +310,10 @@ async function streamSDKResponse(peer: any, session: any, conversationId: string
           })
         }
 
-        // Count messages
         const msgs = await db.select()
           .from(schema.conversationMessages)
           .where(eq(schema.conversationMessages.conversationId, conversationId))
 
-        // Update conversation metadata
         await db.update(schema.conversations)
           .set({
             status: 'idle',
@@ -314,7 +323,6 @@ async function streamSDKResponse(peer: any, session: any, conversationId: string
           })
           .where(eq(schema.conversations.id, conversationId))
 
-        // Log token usage
         const [conv] = await db.select({ title: schema.conversations.title })
           .from(schema.conversations)
           .where(eq(schema.conversations.id, conversationId))
@@ -324,6 +332,7 @@ async function streamSDKResponse(peer: any, session: any, conversationId: string
           source: 'chat',
           sourceId: conversationId,
           sourceName: conv?.title || 'Chat',
+          provider: 'claude-code',
           inputTokens,
           outputTokens,
           costUsd,
@@ -341,7 +350,153 @@ async function streamSDKResponse(peer: any, session: any, conversationId: string
     }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error)
-    console.error('[chat] Stream error:', errorMsg)
+    console.error('[chat] SDK stream error:', errorMsg)
+    send(peer, { type: 'chat:error', conversationId, message: errorMsg })
+
+    await db.update(schema.conversations)
+      .set({ status: 'error' })
+      .where(eq(schema.conversations.id, conversationId))
+  } finally {
+    chatSessionManager.removeSession(conversationId)
+  }
+}
+
+// =============================================================================
+// AI SDK Streaming (all other providers)
+// =============================================================================
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function streamAiSdkResponse(peer: any, session: any, conversationId: string, provider: any) {
+  const db = getDb()
+  const contentBlocks: ChatContentBlock[] = []
+  const startTime = Date.now()
+
+  try {
+    const stream = session.aiStream
+
+    // Consume the full stream via the async iterable
+    for await (const chunk of stream.fullStream) {
+      if (session.interrupted) {
+        send(peer, { type: 'chat:interrupted', conversationId })
+        await db.update(schema.conversations)
+          .set({ status: 'interrupted' })
+          .where(eq(schema.conversations.id, conversationId))
+        break
+      }
+
+      switch (chunk.type) {
+        case 'text-delta':
+          send(peer, { type: 'chat:text_delta', conversationId, delta: chunk.textDelta })
+          break
+
+        case 'tool-call':
+          send(peer, {
+            type: 'chat:tool_start',
+            conversationId,
+            toolUseId: chunk.toolCallId,
+            toolName: chunk.toolName
+          })
+          contentBlocks.push({
+            type: 'tool_use',
+            id: chunk.toolCallId,
+            name: chunk.toolName,
+            input: chunk.args as Record<string, unknown>
+          })
+          break
+
+        case 'tool-result':
+          // eslint-disable-next-line no-case-declarations
+          const resultText = typeof chunk.result === 'string'
+            ? chunk.result
+            : JSON.stringify(chunk.result ?? '')
+          contentBlocks.push({
+            type: 'tool_result',
+            tool_use_id: chunk.toolCallId,
+            content: resultText,
+            is_error: false
+          })
+          send(peer, {
+            type: 'chat:tool_end',
+            conversationId,
+            toolUseId: chunk.toolCallId,
+            result: resultText.slice(0, 5000),
+            isError: false
+          })
+          break
+
+        case 'step-finish':
+          // Capture text content from completed steps
+          if (chunk.text)
+            contentBlocks.push({ type: 'text', text: chunk.text })
+          break
+      }
+    }
+
+    // Get final usage after stream completes
+    const usage = await stream.usage
+    const inputTokens = usage?.promptTokens || 0
+    const outputTokens = usage?.completionTokens || 0
+    const durationMs = Date.now() - startTime
+    const costUsd = estimateCost(provider.model, inputTokens, outputTokens)
+
+    // Also capture the final text if not yet in contentBlocks
+    const finalText = await stream.text
+    if (finalText && !contentBlocks.some(b => b.type === 'text' && b.text === finalText))
+      contentBlocks.push({ type: 'text', text: finalText })
+
+    // Persist assistant message
+    if (contentBlocks.length > 0) {
+      await db.insert(schema.conversationMessages).values({
+        conversationId,
+        role: 'assistant',
+        content: JSON.stringify(contentBlocks),
+        costUsd,
+        durationMs
+      })
+    }
+
+    // Update conversation metadata
+    const msgs = await db.select()
+      .from(schema.conversationMessages)
+      .where(eq(schema.conversationMessages.conversationId, conversationId))
+
+    await db.update(schema.conversations)
+      .set({
+        status: 'idle',
+        messageCount: msgs.length,
+        totalCostUsd: costUsd,
+        endedAt: new Date()
+      })
+      .where(eq(schema.conversations.id, conversationId))
+
+    // Log token usage
+    const [conv] = await db.select({ title: schema.conversations.title })
+      .from(schema.conversations)
+      .where(eq(schema.conversations.id, conversationId))
+      .limit(1)
+
+    logTokenUsage({
+      source: 'chat',
+      sourceId: conversationId,
+      sourceName: conv?.title || 'Chat',
+      provider: provider.type,
+      model: provider.model,
+      inputTokens,
+      outputTokens,
+      costUsd,
+      durationMs,
+      numTurns: 1
+    })
+
+    send(peer, {
+      type: 'chat:stream_end',
+      conversationId,
+      costUsd,
+      durationMs
+    })
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error)
+    console.error('[chat] AI SDK stream error:', errorMsg)
     send(peer, { type: 'chat:error', conversationId, message: errorMsg })
 
     await db.update(schema.conversations)

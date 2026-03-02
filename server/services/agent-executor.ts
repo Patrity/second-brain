@@ -1,10 +1,17 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
+import { generateText, stepCountIs } from 'ai'
 import { eq } from 'drizzle-orm'
-import { getDb } from '../db'
-import * as schema from '../db/schema'
-import { agentRegistry } from '../utils/agent-registry'
-import { notifyResourceChange } from '../utils/notify-resource'
-import { logTokenUsage } from '../utils/log-token-usage'
+import { getDb } from '~~/server/db'
+import * as schema from '~~/server/db/schema'
+import { agentRegistry } from '~~/server/utils/agent-registry'
+import { notifyResourceChange } from '~~/server/utils/notify-resource'
+import { logTokenUsage } from '~~/server/utils/log-token-usage'
+import { getProviderForAgent } from '~~/server/ai/get-provider'
+import { createModel } from '~~/server/ai/provider'
+import { buildSystemPrompt } from '~~/server/ai/prompt-builder'
+import { getAiSdkTools } from '~~/server/ai/tools'
+import { estimateCost } from '~~/server/ai/cost'
+import type { ProviderConfig } from '~~/server/ai/types'
 
 // Custom error for cancellation
 export class AgentCancelledError extends Error {
@@ -58,8 +65,18 @@ export async function executeAgent(config: AgentConfig): Promise<void> {
     meta: { runId }
   })
 
+  // Determine which provider to use
+  const provider = await getProviderForAgent(config.id)
+
   try {
-    const result = await runAgentSDK(config, runId)
+    let result: AgentResult
+
+    if (provider.type === 'claude-code') {
+      result = await runAgentSDK(config, runId)
+    } else {
+      result = await runAgentAiSdk(config, runId, provider)
+    }
+
     const durationMs = Date.now() - startTime
 
     // Determine status based on result subtype
@@ -94,6 +111,8 @@ export async function executeAgent(config: AgentConfig): Promise<void> {
       source: 'agent',
       sourceId: runId,
       sourceName: config.name,
+      provider: provider.type,
+      model: provider.model,
       inputTokens: result.usage.input_tokens,
       outputTokens: result.usage.output_tokens,
       costUsd: result.total_cost_usd,
@@ -116,7 +135,6 @@ export async function executeAgent(config: AgentConfig): Promise<void> {
     const isCancelled = error instanceof AgentCancelledError
 
     if (isCancelled) {
-      // Handle cancellation
       await db.update(schema.cronAgentRuns)
         .set({
           status: 'cancelled',
@@ -140,7 +158,6 @@ export async function executeAgent(config: AgentConfig): Promise<void> {
         meta: { runId }
       })
     } else {
-      // Handle other errors
       const errorMessage = error instanceof Error ? error.message : String(error)
 
       await db.update(schema.cronAgentRuns)
@@ -168,14 +185,14 @@ export async function executeAgent(config: AgentConfig): Promise<void> {
       })
     }
   } finally {
-    // Always unregister the agent when done
     agentRegistry.unregister(runId)
   }
 }
 
+/**
+ * Run agent via Claude Agent SDK (claude-code provider).
+ */
 async function runAgentSDK(config: AgentConfig, runId: string): Promise<AgentResult> {
-  // SDK checks CLAUDE_CODE_OAUTH_TOKEN first (Max subscription),
-  // then falls back to ANTHROPIC_API_KEY (API billing)
   const conversation = query({
     prompt: config.prompt,
     options: {
@@ -190,16 +207,11 @@ async function runAgentSDK(config: AgentConfig, runId: string): Promise<AgentRes
 
   let resultMessage: AgentResult | undefined
 
-  // Stream through messages and collect output
   for await (const message of conversation) {
-    // Check for cancellation between messages
-    if (agentRegistry.isCancelled(runId)) {
+    if (agentRegistry.isCancelled(runId))
       throw new AgentCancelledError()
-    }
 
     if (message.type === 'result') {
-      // Extract the fields we need from the SDK result
-      // Cast through unknown as SDK types don't expose usage properties correctly
       const msg = message as unknown as {
         subtype: string
         total_cost_usd: number
@@ -222,9 +234,60 @@ async function runAgentSDK(config: AgentConfig, runId: string): Promise<AgentRes
     }
   }
 
-  if (!resultMessage) {
+  if (!resultMessage)
     throw new Error('No result message received from SDK')
-  }
 
   return resultMessage
+}
+
+/**
+ * Run agent via AI SDK (all non-claude-code providers).
+ */
+async function runAgentAiSdk(
+  config: AgentConfig,
+  runId: string,
+  provider: ProviderConfig
+): Promise<AgentResult> {
+  const model = await createModel(provider)
+  const systemPrompt = await buildSystemPrompt()
+
+  const abortController = new AbortController()
+
+  // Check cancellation periodically
+  const cancelCheck = setInterval(() => {
+    if (agentRegistry.isCancelled(runId))
+      abortController.abort()
+  }, 1000)
+
+  try {
+    const result = await generateText({
+      model,
+      system: systemPrompt,
+      prompt: config.prompt,
+      tools: getAiSdkTools(),
+      stopWhen: stepCountIs(config.maxTurns ?? 50),
+      abortSignal: abortController.signal
+    })
+
+    const inputTokens = result.usage?.inputTokens || 0
+    const outputTokens = result.usage?.outputTokens || 0
+    const cost = estimateCost(provider.model, inputTokens, outputTokens)
+
+    return {
+      subtype: 'success',
+      total_cost_usd: cost,
+      num_turns: result.steps?.length || 1,
+      result: result.text,
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens
+      }
+    }
+  } catch (error) {
+    if (agentRegistry.isCancelled(runId))
+      throw new AgentCancelledError()
+    throw error
+  } finally {
+    clearInterval(cancelCheck)
+  }
 }

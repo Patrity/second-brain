@@ -33,6 +33,14 @@ export function generateEnvFile(config: InitConfig): string {
     `AGENT_TONE=${config.personality.tone}`
   ]
 
+  // AI Provider keys (if configured during init)
+  if (config.aiProvider) {
+    lines.push('')
+    lines.push('# AI Provider')
+    if (config.aiProvider.apiKey)
+      lines.push(`${config.aiProvider.envKey}=${config.aiProvider.apiKey}`)
+  }
+
   lines.push('')
   return lines.join('\n')
 }

@@ -26,6 +26,26 @@ export interface AuthConfig {
   authSecret: string
 }
 
+export type AIProviderType
+  = 'claude-code'
+    | 'anthropic'
+    | 'openai'
+    | 'google'
+    | 'xai'
+    | 'openrouter'
+    | 'ollama'
+    | 'custom'
+
+export interface AIProviderConfig {
+  type: AIProviderType
+  name: string
+  model: string
+  apiKey?: string
+  baseUrl?: string
+  envKey?: string
+  isDefault: boolean
+}
+
 export interface InitConfig {
   personality: PersonalityConfig
   vault: VaultConfig
@@ -34,6 +54,7 @@ export interface InitConfig {
   appUrl: string
   accessMode: 'localhost' | 'specific' | 'any'
   installDir: string
+  aiProvider?: AIProviderConfig
 }
 
 export interface SecondBrainMetadata {
