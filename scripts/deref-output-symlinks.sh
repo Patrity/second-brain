@@ -9,10 +9,12 @@ if [ ! -d "$DIR" ]; then
   exit 0
 fi
 
-find "$DIR" -maxdepth 3 -type l | while read -r link; do
+COUNT=0
+find "$DIR" -type l | while read -r link; do
   target=$(readlink -f "$link")
   rm "$link"
   cp -r "$target" "$link"
+  COUNT=$((COUNT + 1))
 done
 
 echo "Dereferenced symlinks in $DIR"
