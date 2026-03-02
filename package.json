@@ -26,7 +26,7 @@
   "scripts": {
     "cli:build": "pnpm --filter cognova-cli build",
     "cli:dev": "pnpm --filter cognova-cli dev",
-    "build": "nuxt build",
+    "build": "nuxt build && bash scripts/deref-output-symlinks.sh",
     "dev": "nuxt dev",
     "preview": "nuxt preview",
     "prepare": "nuxt prepare",
