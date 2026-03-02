@@ -41,6 +41,22 @@ function getDocIcon(doc: ChatDocumentBlock): string {
   return 'i-lucide-file-code'
 }
 
+// Copy markdown
+const { copy } = useCopyToClipboard()
+const copied = ref(false)
+
+async function copyMarkdown(blocks: ChatContentBlock[]) {
+  const text = getTextContent(blocks)
+  if (!text) return
+  const ok = await copy(text)
+  if (ok) {
+    copied.value = true
+    setTimeout(() => {
+      copied.value = false
+    }, 2000)
+  }
+}
+
 // Image preview
 const previewImage = ref<ChatImageBlock | null>(null)
 const previewOpen = computed({
@@ -244,13 +260,23 @@ function formatTime(date: Date | string | undefined): string {
           :is-error="tool.isError"
         />
 
-        <!-- Cost/duration metadata -->
+        <!-- Cost/duration metadata + copy button -->
         <div
-          v-if="message.costUsd || message.durationMs"
+          v-if="message.costUsd || message.durationMs || getTextContent(message.content)"
           class="flex items-center gap-3 mt-2 text-xs text-dimmed"
         >
           <span v-if="message.costUsd">${{ message.costUsd.toFixed(4) }}</span>
           <span v-if="message.durationMs">{{ (message.durationMs / 1000).toFixed(1) }}s</span>
+          <button
+            v-if="getTextContent(message.content)"
+            class="ml-auto flex items-center gap-1 hover:text-highlighted transition-colors"
+            @click="copyMarkdown(message.content)"
+          >
+            <UIcon
+              :name="copied ? 'i-lucide-check' : 'i-lucide-copy'"
+              class="size-3"
+            />
+          </button>
         </div>
       </template>
 
