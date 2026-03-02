@@ -14,7 +14,13 @@ async function loadAppUrl() {
     const { data } = await $fetch<{ data: { key: string, value: string } }>('/api/secrets/APP_URL')
     appUrl.value = data.value || ''
   } catch {
-    appUrl.value = ''
+    // APP_URL secret doesn't exist; fall back to BETTER_AUTH_URL from env
+    try {
+      const health = await $fetch<{ appUrl: string | null }>('/api/health')
+      appUrl.value = health.appUrl || ''
+    } catch {
+      appUrl.value = ''
+    }
   }
 }
 
@@ -46,6 +52,51 @@ async function saveAppUrl() {
     toast.add({ title: 'Failed to save URL', color: 'error' })
   }
   appUrlSaving.value = false
+}
+
+// === Version & Updates ===
+interface UpdateInfo {
+  currentVersion: string
+  channel: string
+  latestVersion: string | null
+  updateAvailable: boolean
+  updateCommand: string | null
+}
+
+const versionInfo = ref<UpdateInfo | null>(null)
+const versionLoading = ref(true)
+const checkingUpdate = ref(false)
+
+async function loadVersionInfo() {
+  versionLoading.value = true
+  try {
+    const health = await $fetch<{ version: string, channel: string }>('/api/health')
+    versionInfo.value = {
+      currentVersion: health.version,
+      channel: health.channel,
+      latestVersion: null,
+      updateAvailable: false,
+      updateCommand: null
+    }
+  } catch {
+    // ignore
+  }
+  versionLoading.value = false
+}
+
+async function checkForUpdates() {
+  checkingUpdate.value = true
+  try {
+    const { data } = await $fetch<{ data: UpdateInfo }>('/api/update-check')
+    versionInfo.value = data
+    if (data.updateAvailable)
+      toast.add({ title: `Update available: v${data.latestVersion}`, color: 'info' })
+    else
+      toast.add({ title: 'You are on the latest version', color: 'success' })
+  } catch {
+    toast.add({ title: 'Failed to check for updates', color: 'error' })
+  }
+  checkingUpdate.value = false
 }
 
 // === Notification Preferences ===
@@ -114,6 +165,7 @@ function setSubtypeEnabled(key: NotificationResource, subtype: NotificationActio
 
 onMounted(() => {
   loadAppUrl()
+  loadVersionInfo()
   loadNotificationPrefs()
 })
 </script>
@@ -144,6 +196,86 @@ onMounted(() => {
       <p class="text-xs text-dimmed mt-2">
         Leave empty to use long-polling for Telegram instead of webhooks. Changes require restarting running integrations.
       </p>
+    </div>
+
+    <USeparator class="mb-8" />
+
+    <!-- Version & Updates -->
+    <div class="mb-8">
+      <h3 class="text-lg font-semibold mb-1">
+        Version & Updates
+      </h3>
+      <p class="text-sm text-dimmed mb-4">
+        Current installation version and update status.
+      </p>
+
+      <div
+        v-if="versionLoading"
+        class="space-y-2"
+      >
+        <USkeleton class="h-5 w-48" />
+        <USkeleton class="h-5 w-32" />
+      </div>
+
+      <div
+        v-else-if="versionInfo"
+        class="space-y-3"
+      >
+        <div class="flex items-center gap-2">
+          <span class="text-sm font-medium">Version:</span>
+          <span class="text-sm font-mono">v{{ versionInfo.currentVersion }}</span>
+          <UBadge
+            :color="versionInfo.channel === 'latest' ? 'success' : 'warning'"
+            variant="subtle"
+            size="xs"
+          >
+            {{ versionInfo.channel }}
+          </UBadge>
+        </div>
+
+        <div
+          v-if="versionInfo.updateAvailable && versionInfo.latestVersion"
+          class="flex items-center gap-2"
+        >
+          <UIcon
+            name="i-lucide-arrow-up-circle"
+            class="size-4 text-info"
+          />
+          <span class="text-sm">
+            Update available: <span class="font-mono font-medium">v{{ versionInfo.latestVersion }}</span>
+          </span>
+        </div>
+
+        <div
+          v-if="versionInfo.updateAvailable && versionInfo.updateCommand"
+          class="rounded-md bg-elevated p-3"
+        >
+          <p class="text-xs text-dimmed mb-1">
+            Run in your terminal:
+          </p>
+          <code class="text-sm font-mono">{{ versionInfo.updateCommand }}</code>
+        </div>
+
+        <div
+          v-if="versionInfo.latestVersion && !versionInfo.updateAvailable"
+          class="flex items-center gap-2"
+        >
+          <UIcon
+            name="i-lucide-check-circle"
+            class="size-4 text-success"
+          />
+          <span class="text-sm text-dimmed">Up to date</span>
+        </div>
+
+        <UButton
+          variant="outline"
+          :loading="checkingUpdate"
+          icon="i-lucide-refresh-cw"
+          @click="checkForUpdates"
+        >
+          Check for Updates
+        </UButton>
+      </div>
     </div>
 
     <USeparator class="mb-8" />

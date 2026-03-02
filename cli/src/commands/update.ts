@@ -138,6 +138,18 @@ export async function update() {
     s.start('Running database migrations')
     execSync('pnpm db:migrate', { cwd: installDir, stdio: 'pipe', env: envWithDotenv })
     s.stop('Migrations complete')
+
+    // Update the global CLI binary so `cognova -v`, `--channel`, etc. stay current
+    s.start('Updating CLI')
+    try {
+      const cmd = process.platform === 'linux'
+        ? `sudo npm install -g cognova@${latestVersion}`
+        : `npm install -g cognova@${latestVersion}`
+      execSync(cmd, { stdio: process.platform === 'linux' ? 'inherit' : 'pipe' })
+      s.stop('CLI updated')
+    } catch {
+      s.stop('CLI update skipped — run manually: npm install -g cognova@' + latestVersion)
+    }
   } catch (err) {
     updateFailed = true
     s.stop(pc.red('Update failed'))

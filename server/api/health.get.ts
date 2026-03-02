@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm'
 import { getDbState, isDbAvailable } from '~~/server/utils/db-state'
 import { getDb } from '~~/server/db'
+import { getAppVersion } from '~~/server/utils/app-version'
 
 function getDeploymentType(url: string): 'local' | 'remote' | null {
   if (!url) return null
@@ -26,9 +27,14 @@ export default defineEventHandler(async (event) => {
     }
   }
 
+  const { version, channel } = getAppVersion()
+
   return {
     status: 'ok',
     timestamp: new Date().toISOString(),
+    version,
+    channel,
+    appUrl: process.env.BETTER_AUTH_URL || null,
     database: {
       configured: !!config.databaseUrl,
       deployment: getDeploymentType(config.databaseUrl),
