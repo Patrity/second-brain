@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, existsSync, writeFileSync, readdirSync } from 'fs'
+import { cpSync, rmSync, mkdirSync, existsSync, writeFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import * as p from '@clack/prompts'
 import { getPackageDir } from './paths'
@@ -42,6 +42,10 @@ export function copyAppSource(sourceDir: string, installDir: string) {
 
     // Skip items that should be preserved during updates
     if (PRESERVE_ON_UPDATE.has(item) && existsSync(dest)) continue
+
+    // Remove existing destination first to avoid stale files / broken symlinks
+    if (existsSync(dest))
+      rmSync(dest, { recursive: true, force: true })
 
     cpSync(src, dest, { recursive: true, force: true })
   }
