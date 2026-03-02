@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+if [[ "$(git rev-parse --abbrev-ref HEAD)" != "master" ]]; then
+  echo "✗ Must be on master branch to release"
+  exit 1
+fi
+
 echo "→ Bumping prerelease version"
 npm version prerelease --preid=next
 

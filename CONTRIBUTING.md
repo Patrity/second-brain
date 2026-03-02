@@ -94,15 +94,19 @@ Cognova is published to npm. Users install and update via the CLI (`cognova init
 
 | Branch | Purpose |
 |--------|---------|
-| `master` | Stable, production-ready. Tagged releases. What `@latest` points to. |
-| `develop` | Active development. Pre-releases publish from here. |
+| `master` | Stable, production-ready. All releases (next and stable) publish from here. |
+| `develop` | Active feature development. Merge to master when ready to release. |
 
 ### Pre-release (`@next`)
 
 Use this to test changes on a real server without touching `@latest`.
 
 ```bash
-# From develop branch
+# 1. Merge develop → master when ready
+git checkout master
+git merge develop
+
+# 2. Publish pre-release
 pnpm release:next
 ```
 
@@ -111,7 +115,7 @@ This bumps the prerelease version (e.g. `0.3.0-next.0` → `0.3.0-next.1`), buil
 ### Stable Release
 
 ```bash
-# 1. Merge develop → master
+# 1. Merge develop → master (if not already)
 git checkout master
 git merge develop
 
