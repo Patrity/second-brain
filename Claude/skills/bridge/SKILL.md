@@ -1,7 +1,6 @@
 ---
 name: bridge
 description: Manage message bridge integrations (Telegram, Discord, iMessage, Google Suite, Email). List, enable, disable, configure, send messages, and look up contacts.
-allowed-tools: Bash, Read
 metadata:
   version: "1.0.0"
   requires-secrets: []
@@ -16,18 +15,20 @@ Manage external platform integrations for the message bridge system.
 
 ## Commands
 
+> All commands that take a bridge identifier accept a full UUID, a bridge name (case-insensitive), or a short ID prefix (first 8+ characters).
+
 ### List all bridges
 
 ```bash
 python3 ~/.claude/skills/bridge/bridge.py list
 ```
 
-Shows all configured bridges with their platform, status, and health.
+Shows all configured bridges with their short ID, platform, status, and health. Use the short ID or name with any other command.
 
 ### Get bridge details
 
 ```bash
-python3 ~/.claude/skills/bridge/bridge.py get <BRIDGE_ID>
+python3 ~/.claude/skills/bridge/bridge.py get <NAME_OR_ID>
 ```
 
 Shows detailed configuration for a specific bridge.
@@ -43,14 +44,14 @@ Creates a new bridge integration. Platforms: `telegram`, `discord`, `imessage`, 
 ### Enable/disable a bridge
 
 ```bash
-python3 ~/.claude/skills/bridge/bridge.py enable <BRIDGE_ID>
-python3 ~/.claude/skills/bridge/bridge.py disable <BRIDGE_ID>
+python3 ~/.claude/skills/bridge/bridge.py enable <NAME_OR_ID>
+python3 ~/.claude/skills/bridge/bridge.py disable <NAME_OR_ID>
 ```
 
 ### Update bridge config
 
 ```bash
-python3 ~/.claude/skills/bridge/bridge.py configure <BRIDGE_ID> --config '{"key": "value"}'
+python3 ~/.claude/skills/bridge/bridge.py configure <NAME_OR_ID> --config '{"key": "value"}'
 ```
 
 Updates platform-specific configuration (JSON).
@@ -58,7 +59,7 @@ Updates platform-specific configuration (JSON).
 ### Delete a bridge
 
 ```bash
-python3 ~/.claude/skills/bridge/bridge.py delete <BRIDGE_ID>
+python3 ~/.claude/skills/bridge/bridge.py delete <NAME_OR_ID>
 ```
 
 Permanently removes a bridge and all its message history.
@@ -66,7 +67,7 @@ Permanently removes a bridge and all its message history.
 ### List contacts for a bridge
 
 ```bash
-python3 ~/.claude/skills/bridge/bridge.py contacts <BRIDGE_ID> [--query "search"] [--limit 50]
+python3 ~/.claude/skills/bridge/bridge.py contacts <NAME_OR_ID> [--query "search"] [--limit 50]
 ```
 
 Lists people who have messaged through this bridge. Returns name, platform ID (needed for sending), message count, and last message time. Use `--query` to filter by name or ID.
@@ -74,15 +75,15 @@ Lists people who have messaged through this bridge. Returns name, platform ID (n
 ### Send a message through a bridge
 
 ```bash
-python3 ~/.claude/skills/bridge/bridge.py send <BRIDGE_ID> --recipient <RECIPIENT_ID> --text "Hello!"
+python3 ~/.claude/skills/bridge/bridge.py send <NAME_OR_ID> --recipient <RECIPIENT_ID> --text "Hello!"
 ```
 
 Sends a message to a specific recipient. The `--recipient` is the platform-specific ID (e.g., Telegram chat_id, Discord user_id). Use `contacts` to look up recipient IDs first.
 
 **Workflow for sending a message to someone:**
-1. `list` → find the bridge ID for the platform
-2. `contacts <BRIDGE_ID> --query "name"` → find the recipient's platform ID
-3. `send <BRIDGE_ID> --recipient <ID> --text "message"` → send the message
+1. `list` → identify the bridge name for the platform
+2. `contacts <NAME> --query "name"` → find the recipient's platform ID
+3. `send <NAME> --recipient <ID> --text "message"` → send the message
 
 ### Show integration context
 
@@ -101,9 +102,31 @@ Shows the current integration context that gets injected into sessions.
 - "What integrations do I have?" → Use `list`
 - "Disable Discord" → Use `disable`
 - "Check bridge status" → Use `list` (shows health)
-- "Send a message to X on Telegram" → `list` → `contacts` → `send`
-- "Who has messaged me on Telegram?" → `list` → `contacts`
-- "Message @username on Discord" → `list` → `contacts --query username` → `send`
+- "Send a message to X on Telegram" → `contacts telegram --query "X"` → `send telegram --recipient <ID> --text "..."`
+- "Who has messaged me on Telegram?" → `contacts telegram`
+- "Message @username on Discord" → `contacts discord --query username` → `send discord --recipient <ID> --text "..."`
+
+### Wiring bridge notifications into cron agents
+
+When a user asks to set up a cron/scheduled agent that should notify them (e.g. "send me a daily Discord summary"), follow this workflow before creating the agent:
+
+1. **Check for a connected bridge** — `list` → find the requested platform
+   - If no bridge for that platform: offer to set one up first (see Setup Guides below)
+   - If bridge exists but health is not `connected`: warn the user before proceeding
+2. **Resolve the user's own recipient ID** — `contacts <bridge> --query "<username or name>"` → get their platform ID
+   - If not found: ask the user to send the bot a message first so it can learn their ID, then re-run contacts
+3. **Create the cron agent** — include the bridge send command directly in the agent's prompt so it fires at the end of each run:
+
+```
+POST /api/agents
+{
+  "name": "Daily Discord Summary",
+  "schedule": "0 9 * * *",
+  "prompt": "... do the work ... then send a summary:\npython3 ~/.claude/skills/bridge/bridge.py send discord --recipient <RESOLVED_ID> --text \"<summary>\""
+}
+```
+
+The recipient ID must be resolved at agent-creation time and hardcoded into the prompt — the cron agent has no interactive way to look it up at runtime.
 
 ## Setup Guides
 

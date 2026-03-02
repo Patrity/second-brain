@@ -29,6 +29,35 @@ HEALTH_ICONS = {
 }
 
 
+def resolve_bridge_id(name_or_id):
+    """Resolve a bridge name, short ID prefix, or full UUID to a full UUID."""
+    # If it looks like a full UUID, pass through
+    if len(name_or_id) == 36 and name_or_id.count('-') == 4:
+        return name_or_id
+
+    success, data = get("/bridges")
+    if not success:
+        print(f"Error fetching bridges: {data}")
+        sys.exit(1)
+
+    bridges = data if isinstance(data, list) else []
+    name_lower = name_or_id.lower()
+
+    # Case-insensitive name match
+    for b in bridges:
+        if b.get("name", "").lower() == name_lower:
+            return b["id"]
+
+    # Short ID prefix match
+    for b in bridges:
+        if b.get("id", "").startswith(name_or_id):
+            return b["id"]
+
+    print(f"Error: No bridge found matching '{name_or_id}'")
+    print("Use 'list' to see available bridges.")
+    sys.exit(1)
+
+
 def cmd_list(args):
     """List all configured bridges."""
     success, data = get("/bridges")
@@ -46,22 +75,24 @@ def cmd_list(args):
     name_width = max(len(b.get("name", "")) for b in bridges)
     name_width = max(name_width, 4)
 
-    print(f"{'Name':<{name_width}}  {'Platform':<12}  {'Enabled':<8}  {'Health'}")
-    print(f"{'-' * name_width}  {'-' * 12}  {'-' * 8}  {'-' * 15}")
+    print(f"{'ID':<8}  {'Name':<{name_width}}  {'Platform':<12}  {'Enabled':<8}  {'Health'}")
+    print(f"{'-' * 8}  {'-' * name_width}  {'-' * 12}  {'-' * 8}  {'-' * 15}")
 
     for b in bridges:
+        short_id = b.get("id", "")[:8]
         name = b.get("name", "")
         platform = PLATFORM_LABELS.get(b.get("platform", ""), b.get("platform", ""))
         enabled = "Yes" if b.get("enabled") else "No"
         health = b.get("healthStatus", "unconfigured")
         icon = HEALTH_ICONS.get(health, "?")
-        print(f"{name:<{name_width}}  {platform:<12}  {enabled:<8}  [{icon}] {health}")
+        print(f"{short_id:<8}  {name:<{name_width}}  {platform:<12}  {enabled:<8}  [{icon}] {health}")
 
     print(f"\n{len(bridges)} bridge(s) configured.")
 
 
 def cmd_get(args):
     """Get bridge details."""
+    args.id = resolve_bridge_id(args.id)
     success, data = get(f"/bridges/{args.id}")
     if not success:
         print(f"Error: {data}")
@@ -115,6 +146,7 @@ def cmd_create(args):
 
 def cmd_enable(args):
     """Enable a bridge."""
+    args.id = resolve_bridge_id(args.id)
     success, data = put(f"/bridges/{args.id}", {"enabled": True})
     if not success:
         print(f"Error: {data}")
@@ -124,6 +156,7 @@ def cmd_enable(args):
 
 def cmd_disable(args):
     """Disable a bridge."""
+    args.id = resolve_bridge_id(args.id)
     success, data = put(f"/bridges/{args.id}", {"enabled": False})
     if not success:
         print(f"Error: {data}")
@@ -133,6 +166,7 @@ def cmd_disable(args):
 
 def cmd_configure(args):
     """Update bridge configuration."""
+    args.id = resolve_bridge_id(args.id)
     try:
         config = json.loads(args.config)
     except json.JSONDecodeError as e:
@@ -153,6 +187,7 @@ def cmd_configure(args):
 
 def cmd_delete(args):
     """Delete a bridge."""
+    args.id = resolve_bridge_id(args.id)
     success, data = delete(f"/bridges/{args.id}")
     if not success:
         print(f"Error: {data}")
@@ -162,6 +197,7 @@ def cmd_delete(args):
 
 def cmd_contacts(args):
     """List known contacts for a bridge."""
+    args.id = resolve_bridge_id(args.id)
     params = {}
     if args.query:
         params["q"] = args.query
@@ -196,6 +232,7 @@ def cmd_contacts(args):
 
 def cmd_send(args):
     """Send a message through a bridge."""
+    args.id = resolve_bridge_id(args.id)
     body = {
         "recipient": args.recipient,
         "text": args.text
