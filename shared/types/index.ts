@@ -209,6 +209,7 @@ export interface Conversation {
   id: string
   sessionId: string
   sdkSessionId?: string
+  providerId?: string
   title?: string
   summary?: string
   status: 'idle' | 'streaming' | 'interrupted' | 'error'
@@ -252,6 +253,7 @@ export interface CronAgent {
   schedule: string
   prompt: string
   enabled: boolean
+  providerId?: string
   maxTurns?: number
   maxBudgetUsd?: number
   lastRunAt?: Date
@@ -283,6 +285,7 @@ export interface CreateAgentInput {
   schedule: string
   prompt: string
   enabled?: boolean
+  providerId?: string
   maxTurns?: number
   maxBudgetUsd?: number
 }
@@ -293,6 +296,7 @@ export interface UpdateAgentInput {
   schedule?: string
   prompt?: string
   enabled?: boolean
+  providerId?: string | null
   maxTurns?: number
   maxBudgetUsd?: number | null
 }
@@ -388,6 +392,47 @@ export interface AgentDetailStats {
   dailyRuns: DailyRunData[]
 }
 
+// === AI Providers ===
+
+export type AIProviderType
+  = 'claude-code'
+    | 'anthropic'
+    | 'openai'
+    | 'google'
+    | 'xai'
+    | 'openrouter'
+    | 'ollama'
+    | 'custom'
+
+export interface AIProvider {
+  id: string
+  name: string
+  type: AIProviderType
+  model: string
+  baseUrl?: string | null
+  isDefault: boolean
+  createdAt: Date
+  updatedAt: Date
+}
+
+export interface CreateProviderInput {
+  name: string
+  type: AIProviderType
+  model: string
+  baseUrl?: string
+  apiKey?: string
+  isDefault?: boolean
+}
+
+export interface UpdateProviderInput {
+  name?: string
+  type?: AIProviderType
+  model?: string
+  baseUrl?: string | null
+  apiKey?: string | null
+  isDefault?: boolean
+}
+
 // === Token Usage ===
 
 export type TokenUsageSource
@@ -401,6 +446,8 @@ export interface TokenUsageRecord {
   source: TokenUsageSource
   sourceId?: string
   sourceName?: string
+  provider?: string
+  model?: string
   inputTokens: number
   outputTokens: number
   costUsd: number
@@ -736,6 +783,7 @@ export interface ChatConversation {
   id: string
   sessionId: string
   sdkSessionId?: string
+  providerId?: string
   title?: string
   summary?: string
   status: ChatSessionStatus

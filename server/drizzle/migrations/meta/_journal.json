@@ -127,6 +127,13 @@
       "when": 1772053441171,
       "tag": "0017_unusual_landau",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1772348536934,
+      "tag": "0018_ancient_blazing_skull",
+      "breakpoints": true
     }
   ]
 }

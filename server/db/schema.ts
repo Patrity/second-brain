@@ -125,6 +125,7 @@ export const conversations = pgTable('conversations', {
   id: uuid('id').primaryKey().defaultRandom(),
   sessionId: text('session_id').notNull().unique(),
   sdkSessionId: text('sdk_session_id'),
+  providerId: uuid('provider_id').references(() => aiProviders.id, { onDelete: 'set null' }),
   title: text('title'),
   summary: text('summary'),
   status: text('status', {
@@ -150,8 +151,9 @@ export const conversationMessages = pgTable('conversation_messages', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull()
 })
 
-export const conversationsRelations = relations(conversations, ({ many }) => ({
-  messages: many(conversationMessages)
+export const conversationsRelations = relations(conversations, ({ one, many }) => ({
+  messages: many(conversationMessages),
+  provider: one(aiProviders, { fields: [conversations.providerId], references: [aiProviders.id] })
 }))
 
 export const conversationMessagesRelations = relations(conversationMessages, ({ one }) => ({
@@ -217,6 +219,24 @@ export const documentsRelations = relations(documents, ({ one }) => ({
 }))
 
 // =============================================================================
+// AI Providers - Multi-provider configuration
+// =============================================================================
+
+export const aiProviders = pgTable('ai_providers', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  type: text('type', {
+    enum: ['claude-code', 'anthropic', 'openai', 'google', 'xai', 'openrouter', 'ollama', 'custom']
+  }).notNull(),
+  model: text('model').notNull(),
+  baseUrl: text('base_url'),
+  apiKey: text('api_key'), // Encrypted at rest
+  isDefault: boolean('is_default').default(false).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull()
+})
+
+// =============================================================================
 // Cron Agents - Scheduled Claude agents
 // =============================================================================
 
@@ -227,6 +247,7 @@ export const cronAgents = pgTable('cron_agents', {
   schedule: text('schedule').notNull(), // Cron expression: "0 4 * * *"
   prompt: text('prompt').notNull(),
   enabled: boolean('enabled').default(true).notNull(),
+  providerId: uuid('provider_id').references(() => aiProviders.id, { onDelete: 'set null' }),
   maxTurns: integer('max_turns').default(50),
   maxBudgetUsd: real('max_budget_usd'),
   lastRunAt: timestamp('last_run_at', { withTimezone: true }),
@@ -253,7 +274,8 @@ export const cronAgentRuns = pgTable('cron_agent_runs', {
 
 export const cronAgentsRelations = relations(cronAgents, ({ many, one }) => ({
   runs: many(cronAgentRuns),
-  creator: one(user, { fields: [cronAgents.createdBy], references: [user.id] })
+  creator: one(user, { fields: [cronAgents.createdBy], references: [user.id] }),
+  provider: one(aiProviders, { fields: [cronAgents.providerId], references: [aiProviders.id] })
 }))
 
 export const cronAgentRunsRelations = relations(cronAgentRuns, ({ one }) => ({
@@ -387,6 +409,8 @@ export const tokenUsage = pgTable('token_usage', {
   source: text('source', { enum: ['chat', 'agent', 'memory_extraction', 'bridge'] }).notNull(),
   sourceId: text('source_id'),
   sourceName: text('source_name'),
+  provider: text('provider'), // Provider type used (e.g. 'anthropic', 'openai')
+  model: text('model'), // Model ID used (e.g. 'claude-sonnet-4-5-20250929')
   inputTokens: integer('input_tokens').default(0).notNull(),
   outputTokens: integer('output_tokens').default(0).notNull(),
   costUsd: real('cost_usd').default(0).notNull(),
