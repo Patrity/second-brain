@@ -10,17 +10,20 @@ const appUrl = ref('')
 const appUrlSaving = ref(false)
 
 async function loadAppUrl() {
+  // Try the APP_URL secret first (user override), then fall back to BETTER_AUTH_URL from env
+  const secret = await $fetch<{ data: { key: string, value: string } }>('/api/secrets/APP_URL')
+    .catch(() => null)
+
+  if (secret?.data?.value) {
+    appUrl.value = secret.data.value
+    return
+  }
+
   try {
-    const { data } = await $fetch<{ data: { key: string, value: string } }>('/api/secrets/APP_URL')
-    appUrl.value = data.value || ''
+    const health = await $fetch<{ appUrl: string | null }>('/api/health')
+    appUrl.value = health.appUrl || ''
   } catch {
-    // APP_URL secret doesn't exist; fall back to BETTER_AUTH_URL from env
-    try {
-      const health = await $fetch<{ appUrl: string | null }>('/api/health')
-      appUrl.value = health.appUrl || ''
-    } catch {
-      appUrl.value = ''
-    }
+    appUrl.value = ''
   }
 }
 
