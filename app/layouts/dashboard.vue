@@ -187,7 +187,7 @@ const links = [[{
         <span />
       </template>
     </ClientOnly>
-
+    
     <slot />
 
     <ClientOnly>

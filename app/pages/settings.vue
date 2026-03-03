@@ -35,7 +35,7 @@ function navigateTab(value: string | number) {
       </template>
     </UDashboardNavbar>
 
-    <div class="p-6">
+    <div class="p-6 overflow-auto">
       <UTabs
         :items="tabs"
         :model-value="activeTab"
