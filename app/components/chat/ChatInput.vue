@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ChatSessionStatus, ChatConnectionStatus, ChatImageBlock, ChatDocumentBlock } from '~~/shared/types'
+import type { ChatSessionStatus, ChatConnectionStatus, ChatImageBlock, ChatDocumentBlock, SkillListItem } from '~~/shared/types'
 
 const props = defineProps<{
   sessionStatus: ChatSessionStatus
@@ -26,7 +26,63 @@ const canSend = computed(() =>
   && (inputText.value.trim().length > 0 || attachments.value.length > 0)
 )
 
+// Slash command menu — refreshes each time the menu opens so newly created skills appear
+const { data: skillsData, refresh: refreshSkills } = await useAsyncData('chat-skills', () => $fetch('/api/skills'))
+const activeSkills = computed<SkillListItem[]>(() =>
+  (skillsData.value?.data ?? []).filter((s: SkillListItem) => s.active)
+)
+
+const slashQuery = computed(() => {
+  const m = inputText.value.match(/^\/(\S*)$/)
+  return m ? m[1] : null
+})
+
+// Refresh skill list each time the menu opens (user types '/')
+watch(slashQuery, (val, prev) => {
+  if (val != null && prev == null) refreshSkills()
+})
+
+const filteredSkills = computed(() => {
+  if (slashQuery.value == null) return []
+  const q = slashQuery.value.toLowerCase()
+  return q === ''
+    ? activeSkills.value
+    : activeSkills.value.filter(s => s.name.toLowerCase().includes(q))
+})
+
+const highlightedIndex = ref(0)
+watch(filteredSkills, () => {
+  highlightedIndex.value = 0
+})
+
+function selectSkill(skill: SkillListItem) {
+  inputText.value = '/' + skill.name + ' '
+  nextTick(() => textareaRef.value?.focus())
+}
+
 function handleKeydown(e: KeyboardEvent) {
+  if (filteredSkills.value.length > 0) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      highlightedIndex.value = (highlightedIndex.value + 1) % filteredSkills.value.length
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      highlightedIndex.value = (highlightedIndex.value - 1 + filteredSkills.value.length) % filteredSkills.value.length
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      inputText.value = ''
+      return
+    }
+    if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+      e.preventDefault()
+      selectSkill(filteredSkills.value[highlightedIndex.value]!)
+      return
+    }
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     handleSend()
@@ -161,12 +217,30 @@ const FILE_ACCEPT = [
       </div>
     </div>
 
-    <div class="flex items-start gap-2">
+    <!-- Input row (relative so slash menu anchors to it) -->
+    <div class="flex items-start gap-2 relative">
+      <!-- Slash command menu -->
+      <div
+        v-if="filteredSkills.length"
+        class="absolute bottom-full left-0 right-12 mb-1 bg-accented border border-default rounded-lg shadow-lg overflow-hidden max-h-64 overflow-y-auto z-50"
+      >
+        <button
+          v-for="(skill, i) in filteredSkills"
+          :key="skill.name"
+          class="w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-primary/40 transition-colors duration-100"
+          :class="i === highlightedIndex ? 'bg-primary/40' : ''"
+          @mousedown.prevent="selectSkill(skill)"
+        >
+          <span class="text-sm font-mono font-medium text-highlighted shrink-0">/{{ skill.name }}</span>
+          <span class="text-xs text-accented truncate">{{ skill.description }}</span>
+        </button>
+      </div>
+
       <textarea
         ref="textareaRef"
         v-model="inputText"
         :disabled="!isConnected || isStreaming"
-        placeholder="Send a message..."
+        placeholder="Send a message... (type / for skills)"
         rows="1"
         class="flex-1 resize-none bg-elevated/50 border border-default rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
         @keydown="handleKeydown"
